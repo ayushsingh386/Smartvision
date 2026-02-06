@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blind Navigation Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://unpkg.com/@mapbox/polyline@1.1.1/src/polyline.js"></script>
+
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #111827; }
+        @keyframes pulse-red { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.7; transform: scale(1.1); } }
+        .animate-pulse-red { animation: pulse-red 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        .canvas-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #map { height: 100%; width: 100%; border-radius: 0.75rem; background-color: #374151; }
+        .leaflet-control-attribution, .leaflet-control-zoom { display: none !important; }
+    </style>
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+</head>
+<body class="text-gray-200">
+
+    <div class="container mx-auto p-4 md:p-6 lg:p-8">
+        
+        <header class="text-center mb-8">
+            <h1 class="text-4xl md:text-5xl font-bold tracking-tight text-white">SmartVision Assistant</h1>
+            <p class="text-lg text-gray-400 mt-2">Provides Live Camera Feed with Real-time Navigation</p>
+        </header>
+
+        <main class="grid grid-cols-1 lg:grid-cols-5 gap-8">
+
+            <div class="lg:col-span-3 flex flex-col gap-8">
+                <div class="bg-gray-800/50 rounded-2xl shadow-2xl p-4 border border-gray-700 backdrop-blur-sm">
+                    <div id="video-container" class="relative w-full aspect-video rounded-lg overflow-hidden">
+                        <img id="video-feed" src="https://placehold.co/1280x720/1f2937/FFFFFF?text=Initializing+Camera..." alt="Live Video Feed" class="w-full h-full object-cover bg-gray-700">
+                        <canvas id="canvas-overlay" class="canvas-overlay"></canvas>
+                    </div>
+                </div>
+                <div class="bg-gray-800/50 rounded-2xl shadow-2xl p-4 border border-gray-700 backdrop-blur-sm aspect-video">
+                    <div id="map"></div>
+                </div>
+            </div>
+
+            <div class="lg:col-span-2 flex flex-col gap-8">
+                <div class="bg-gray-800/50 rounded-2xl shadow-2xl p-6 border border-gray-700 backdrop-blur-sm">
+                    <h2 class="text-xl font-semibold text-white mb-4">Navigation Control</h2>
+                    <div class="space-y-4">
+                        <div class="bg-gray-900 p-4 rounded-lg">
+                            <div class="text-sm font-medium text-gray-400">CURRENT LOCATION</div>
+                            <div id="location-text" class="text-lg font-semibold text-white mt-1">Requesting Location Permission...</div>
+                        </div>
+                         <div id="next-turn-container" class="text-center bg-gray-900 p-4 rounded-lg hidden">
+                            <div class="text-sm font-medium text-blue-300">NEXT TURN IN</div>
+                            <div id="distance-text" class="text-4xl font-bold text-white">-- m</div>
+                        </div>
+                        <button id="start-nav-btn" class="w-full flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition-transform duration-200 active:scale-95 disabled:bg-gray-500 disabled:cursor-not-allowed" disabled>
+                             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>
+                             Start Navigation
+                         </button>
+                    </div>
+                </div>
+
+                <div class="bg-gray-800/50 rounded-2xl shadow-2xl p-6 border border-gray-700 backdrop-blur-sm flex-grow">
+                     <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-semibold text-white">System Log</h2>
+                         <div class="flex items-center gap-3 p-2 bg-gray-900 rounded-lg">
+                            <div id="status-dot" class="w-4 h-4 rounded-full bg-yellow-500"></div>
+                            <span id="status-text" class="text-sm font-medium text-yellow-300">INIT</span>
+                        </div>
+                    </div>
+                    <div id="log-container" class="h-96 bg-gray-900 rounded-lg p-3 space-y-2 overflow-y-auto"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const socket = io();
+            const videoFeed = document.getElementById('video-feed');
+            const statusDot = document.getElementById('status-dot');
+            const statusText = document.getElementById('status-text');
+            const logContainer = document.getElementById('log-container');
+            const canvas = document.getElementById('canvas-overlay');
+            const ctx = canvas.getContext('2d');
+            const startNavBtn = document.getElementById('start-nav-btn');
+            const nextTurnContainer = document.getElementById('next-turn-container');
+            const distanceText = document.getElementById('distance-text');
+            const locationText = document.getElementById('location-text');
+            
+            //map
+            const map = L.map('map').setView([20.5937, 78.9629], 5); // Default view of India
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { attribution: '', maxZoom: 19 }).addTo(map);
+            let userMarker, routePolyline;
+            const userIcon = L.divIcon({ html: `<div class="w-5 h-5 bg-blue-500 rounded-full border-2 border-white shadow-lg"></div>`, className: '', iconSize: [20, 20], iconAnchor: [10, 10] });
+
+            // Geolocation
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        socket.emit('set_initial_location', {
+                            lat: position.coords.latitude,
+                            lng: position.coords.longitude
+                        });
+                    },
+                    (error) => {
+                        let userMessage = `Geolocation error: ${error.message}.`;
+                        // Check for the specific permissions policy error and provide a better message.
+                        if (error.message.includes("permissions policy")) {
+                            userMessage = "High-accuracy location is disabled in this view due to browser security settings.";
+                        }
+                        addLogMessage(`${userMessage} Falling back to less precise IP-based location.`, 'error');
+                        socket.emit('location_error_fallback');
+                    }
+                );
+            } else {
+                addLogMessage("Geolocation is not supported by this browser. Falling back to IP-based location.", "error");
+                socket.emit('location_error_fallback');
+            }
+            
+            //  Speech Recognition
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            let recognition;
+            if (SpeechRecognition) {
+                recognition = new SpeechRecognition();
+                recognition.continuous = false;
+                recognition.lang = 'en-US';
+
+                recognition.onstart = () => {
+                    startNavBtn.disabled = true;
+                    startNavBtn.innerHTML = `<div class="w-5 h-5 border-t-2 border-white rounded-full animate-spin"></div> Listening...`;
+                };
+
+                recognition.onend = () => {
+                    startNavBtn.disabled = false;
+                    startNavBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg> Start Navigation`;
+                };
+
+                recognition.onresult = (event) => {
+                    const destination = event.results[0][0].transcript;
+                    addLogMessage(`Destination: "${destination}". Calculating route...`, 'success');
+                    socket.emit('start_navigation', { destination });
+                    nextTurnContainer.classList.remove('hidden');
+                };
+
+                recognition.onerror = (event) => {
+                    let errorMessage = `Speech error: ${event.error}`;
+                    if (event.error === 'not-allowed') {
+                        errorMessage = "Microphone permission denied. Please allow microphone access in your browser settings and refresh the page.";
+                    } else if (event.error === 'no-speech') {
+                        errorMessage = "No speech was detected. Please try again.";
+                    }
+                    addLogMessage(errorMessage, 'error');
+                };
+            }
+
+            // --- Event Listeners ---
+            startNavBtn.addEventListener('click', () => {
+                if (recognition && !startNavBtn.disabled) {
+                    addLogMessage("Please say your destination...", "info");
+                    try {
+                        recognition.start();
+                    } catch (e) {
+                        console.error("Error starting speech recognition:", e);
+                        addLogMessage("Could not start listening. Please check browser permissions.", "error");
+                    }
+                } else if (!recognition) {
+                    addLogMessage("Speech Recognition is not supported by this browser.", "error");
+                }
+            });
+
+            // --- Socket.IO Handlers ---
+            socket.on('connect', () => addLogMessage('Connected to server.', 'system'));
+            
+            socket.on('initial_location', (data) => {
+                addLogMessage('Current location detected.', 'system');
+                locationText.textContent = data.address;
+                const latLng = [data.lat, data.lng];
+                map.setView(latLng, 18);
+                if (!userMarker) userMarker = L.marker(latLng, {icon: userIcon}).addTo(map);
+                else userMarker.setLatLng(latLng);
+                startNavBtn.disabled = false; // Enable the button now!
+            });
+
+            socket.on('location_error', (data) => {
+                 addLogMessage(`Location Error: ${data.message}`, 'error');
+                 locationText.textContent = 'Could not determine location.';
+            });
+
+            socket.on('update', (data) => {
+                videoFeed.src = 'data:image/jpeg;base64,' + data.image;
+                if (canvas.width !== videoFeed.clientWidth) resizeCanvas();
+                updateStatus(data.status, data.status === 'SCANNING' ? 'green' : 'red');
+                drawObstacles(data.obstacles);
+            });
+            
+            socket.on('gps_update', (data) => { const latLng = [data.lat, data.lng]; if (userMarker) { userMarker.setLatLng(latLng); map.panTo(latLng); } });
+            socket.on('nav_route_data', (data) => { if(routePolyline) map.removeLayer(routePolyline); const decodedPath = polyline.decode(data.polyline); routePolyline = L.polyline(decodedPath, {color: '#3b82f6', weight: 6, opacity: 0.8}).addTo(map); map.fitBounds(routePolyline.getBounds(), {padding: [50, 50]}); });
+            socket.on('nav_distance_update', (data) => distanceText.textContent = data.message);
+            
+            const navEvents = ['nav_update', 'nav_error', 'nav_route_summary', 'nav_step', 'nav_complete'];
+            const eventTypes = {'nav_error': 'error', 'nav_route_summary': 'success', 'nav_complete': 'success', 'nav_step': 'nav'}
+            navEvents.forEach(event => {
+                socket.on(event, (data) => addLogMessage(data.message, eventTypes[event] || 'info'));
+            });
+
+            // --- NEW: SocketIO handler for Text-to-Speech ---
+            socket.on('speak_alert', (data) => {
+                speakText(data.message);
+            });
+
+            // --- Helper Functions ---
+
+            // --- NEW: Function to speak text using the browser's Web Speech API ---
+            function speakText(text) {
+                if ('speechSynthesis' in window) {
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.lang = 'en-US';
+                    window.speechSynthesis.speak(utterance);
+                } else {
+                    console.error("Speech Synthesis not supported by this browser.");
+                }
+            }
+
+            function addLogMessage(message, type = 'info') {
+                const colors = { 
+                    info: 'text-blue-300', system: 'text-gray-400', error: 'text-red-400 font-semibold', 
+                    success: 'text-green-400 font-semibold', nav: 'text-white'
+                };
+                const p = document.createElement('p');
+                p.innerHTML = `<strong>[${type.toUpperCase()}]</strong> ${message}`;
+                p.className = `log-item ${colors[type] || 'text-gray-300'}`;
+                logContainer.prepend(p);
+            }
+            
+            function updateStatus(text, color) { statusText.textContent = text; statusDot.className = 'w-4 h-4 rounded-full transition-all duration-300'; if (color === 'green') { statusDot.classList.add('bg-green-500'); statusText.className = 'text-sm font-medium text-green-300'; } else if (color === 'red') { statusDot.classList.add('bg-red-500', 'animate-pulse-red'); statusText.className = 'text-sm font-medium text-red-300'; } else { statusDot.classList.add('bg-gray-500'); statusText.className = 'text-sm font-medium text-gray-300';} }
+            function drawObstacles(obstacles) { if (!videoFeed.naturalWidth) return; ctx.clearRect(0, 0, canvas.width, canvas.height); const scaleX = canvas.width / videoFeed.naturalWidth; const scaleY = canvas.height / videoFeed.naturalHeight; obstacles.forEach(obs => { const [x1, y1, x2, y2] = obs.box; const color = obs.is_near ? '#EF4444' : '#34D399'; ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.fillStyle = color; ctx.font = 'bold 14px Inter'; ctx.strokeRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY); const text = obs.label; const textMetrics = ctx.measureText(text); ctx.fillRect(x1*scaleX, y1*scaleY - 20, textMetrics.width + 10, 22); ctx.fillStyle = '#FFFFFF'; ctx.fillText(text, x1*scaleX + 5, y1*scaleY - 5); }); }
+            window.addEventListener('resize', resizeCanvas);
+            function resizeCanvas() { if(videoFeed.clientWidth > 0) {canvas.width = videoFeed.clientWidth; canvas.height = videoFeed.clientHeight;} }
+        });
+    </script>
+</body>
+</html>
